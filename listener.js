@@ -1,194 +1,99 @@
-import WebSocket from "ws";
+const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 
-// -----------------------------
-// CONFIG
-// -----------------------------
-const HELIUS_KEY = process.env.HELIUS_KEY;
+if (!HELIUS_API_KEY) {
+  throw new Error("Missing HELIUS_API_KEY");
+}
 
-// Pump.fun program ID (mainnet)
-const PUMP_PROGRAM_ID =
-  "6EF8rrecthR5Dkzon8QwB6zQ1e3z1b9Yq8Fq3Y6Q6ZQp";
+// Pump.fun program id (VERIFY THIS IS CORRECT)
+const PUMPFUN_PROGRAM_ID =
+  process.env.PUMPFUN_PROGRAM_ID ||
+  "6EF8nqHh...REPLACE_WITH_REAL_ID";
 
-// RPC endpoints
-const RPC_HTTP = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`;
-const RPC_WSS = `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`;
+// Helius RPC HTTPS endpoint (IMPORTANT)
+const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 
-// Deduplication
-const seenSignatures = new Set();
+// track last signature so we don’t double process
+let lastSignature = null;
 
-// -----------------------------
-// START
-// -----------------------------
-console.log("🚀 Larptek Helius Pump.fun Listener Starting...");
-console.log("🔌 Connecting to Helius...");
-
-// -----------------------------
-// WEBSOCKET
-// -----------------------------
-const ws = new WebSocket(RPC_WSS);
-
-ws.on("open", () => {
-  console.log("✅ WebSocket connected");
-
-  ws.send(
-    JSON.stringify({
+async function fetchLatestSignatures() {
+  const res = await fetch(RPC_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
-      method: "logsSubscribe",
+      method: "getSignaturesForAddress",
       params: [
+        PUMPFUN_PROGRAM_ID,
         {
-          mentions: [PUMP_PROGRAM_ID],
-        },
-        {
-          commitment: "processed",
+          limit: 20,
         },
       ],
-    })
-  );
-});
+    }),
+  });
 
-// -----------------------------
-// MESSAGE HANDLER
-// -----------------------------
-ws.on("message", async (data) => {
-  try {
-    const msg = JSON.parse(data.toString());
-    const result = msg?.params?.result;
+  const json = await res.json();
+  return json.result || [];
+}
 
-    if (!result) return;
-
-    const signature = result?.value?.signature;
-    if (!signature) return;
-
-    if (seenSignatures.has(signature)) return;
-    seenSignatures.add(signature);
-
-    console.log(`\n🔥 TX: ${signature}`);
-
-    const tx = await fetchTransaction(signature);
-    if (!tx) return;
-
-    const launch = extractLaunch(tx, signature);
-
-    if (launch) {
-      await ingestSafe(launch);
-    }
-  } catch (err) {
-    console.error("❌ message error:", err.message);
-  }
-});
-
-// -----------------------------
-// FETCH TRANSACTION (native fetch)
-// -----------------------------
 async function fetchTransaction(signature) {
-  try {
-    const res = await fetch(RPC_HTTP, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "getTransaction",
-        params: [
-          signature,
-          {
-            encoding: "jsonParsed",
-            commitment: "processed",
-            maxSupportedTransactionVersion: 0,
-          },
-        ],
-      }),
-    });
+  const res = await fetch(RPC_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getTransaction",
+      params: [
+        signature,
+        {
+          encoding: "jsonParsed",
+          maxSupportedTransactionVersion: 0,
+        },
+      ],
+    }),
+  });
 
-    const json = await res.json();
-    return json?.result || null;
-  } catch (err) {
-    console.error("❌ fetchTransaction error:", err.message);
-    return null;
-  }
+  const json = await res.json();
+  return json.result;
 }
 
-// -----------------------------
-// LAUNCH EXTRACTION
-// -----------------------------
-function extractLaunch(tx, signature) {
-  try {
-    const instructions =
-      tx?.transaction?.message?.instructions || [];
+async function loop() {
+  console.log("🚀 Pump.fun listener (RPC mode) running...");
 
-    let mint = null;
-    let isPump = false;
+  setInterval(async () => {
+    try {
+      const sigs = await fetchLatestSignatures();
 
-    for (const ix of instructions) {
-      const programId = ix?.programId?.toString?.();
+      for (const sig of sigs) {
+        if (sig.signature === lastSignature) break;
 
-      if (programId === PUMP_PROGRAM_ID) {
-        isPump = true;
+        lastSignature = sig.signature;
+
+        const tx = await fetchTransaction(sig.signature);
+        if (!tx) continue;
+
+        const logs = tx?.meta?.logMessages || [];
+
+        // TRUE pump.fun filter (no noise)
+        const isPumpFun = logs.some((l) =>
+          l.toLowerCase().includes("pump")
+        );
+
+        if (!isPumpFun) continue;
+
+        console.log("\n🔥 PUMP.FUN TX:", sig.signature);
+
+        const mint =
+          logs.find((l) => l.includes("mint")) ||
+          "unknown mint";
+
+        console.log("🧬", mint);
       }
-
-      const parsed = ix?.parsed;
-
-      if (parsed?.type === "initializeMint") {
-        mint = parsed?.info?.mint;
-      }
-
-      if (parsed?.type === "mintTo") {
-        mint = parsed?.info?.mint;
-      }
+    } catch (err) {
+      console.error("loop error:", err.message);
     }
-
-    if (!isPump) return null;
-
-    if (!mint) {
-      console.log("⚠️ pump tx but no mint found");
-      return null;
-    }
-
-    console.log("🧬 mint:", mint);
-
-    return {
-      signature,
-      mint,
-      timestamp: Date.now(),
-      source: "pump.fun",
-    };
-  } catch (err) {
-    console.error("❌ extractLaunch error:", err.message);
-    return null;
-  }
+  }, 2000);
 }
 
-// -----------------------------
-// SAFE INGEST
-// -----------------------------
-async function ingestSafe(launch) {
-  try {
-    if (!launch?.mint || !launch?.signature) return;
-
-    await ingestRawLaunch(launch);
-
-    console.log("📦 ingested launch:", launch.mint);
-  } catch (err) {
-    console.error("❌ ingest error:", err.message);
-  }
-}
-
-// -----------------------------
-// INGEST PLACEHOLDER
-// -----------------------------
-async function ingestRawLaunch(launch) {
-  console.log("➡️ ingestRawLaunch:", launch);
-}
-
-// -----------------------------
-// RECONNECT
-// -----------------------------
-ws.on("close", () => {
-  console.log("❌ WebSocket closed — restarting...");
-  setTimeout(() => process.exit(1), 3000);
-});
-
-ws.on("error", (err) => {
-  console.error("❌ WebSocket error:", err.message);
-});
+loop();
