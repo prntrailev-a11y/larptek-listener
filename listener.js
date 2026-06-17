@@ -18,15 +18,19 @@ function connect() {
   ws.on("open", () => {
     console.log("✅ Connected to Helius");
 
-    // VALID HELIUS SUBSCRIPTION
+    /**
+     * ✅ VALID HELIUS logsSubscribe FORMAT
+     * We MUST provide a real filter structure
+     */
+
     const subscribeMsg = {
       jsonrpc: "2.0",
       id: 1,
       method: "logsSubscribe",
       params: [
         {
-          // TEMP FIREHOSE MODE
-          all: true
+          // OPTION 1: all transaction logs (valid)
+          mentions: []
         },
         {
           commitment: "confirmed"
