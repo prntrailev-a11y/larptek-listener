@@ -9,7 +9,7 @@ if (!HELIUS_KEY) {
 
 const WS_URL = `wss://atlas-mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`;
 
-console.log("🚀 Larptek Helius Listener Starting...");
+console.log("🚀 Larptek Listener Starting...");
 console.log("🔌 Connecting:", WS_URL);
 
 function connect() {
@@ -19,8 +19,10 @@ function connect() {
     console.log("✅ Connected to Helius");
 
     /**
-     * ✅ VALID HELIUS logsSubscribe FORMAT
-     * We MUST provide a real filter structure
+     * ✅ VALID HELIUS FORMAT
+     * We must use a SINGLE ADDRESS filter OR program filter
+     *
+     * For debugging, we use SYSTEM PROGRAM (always active)
      */
 
     const subscribeMsg = {
@@ -29,8 +31,9 @@ function connect() {
       method: "logsSubscribe",
       params: [
         {
-          // OPTION 1: all transaction logs (valid)
-          mentions: []
+          mentions: [
+            "11111111111111111111111111111111"
+          ]
         },
         {
           commitment: "confirmed"
@@ -38,10 +41,10 @@ function connect() {
       ]
     };
 
-    console.log("📡 Sending logsSubscribe...");
+    console.log("📡 Subscribing to system program logs...");
     ws.send(JSON.stringify(subscribeMsg));
 
-    console.log("⏳ Listening for logs...");
+    console.log("⏳ Listening...");
   });
 
   ws.on("message", (raw) => {
@@ -63,7 +66,7 @@ function connect() {
 
   setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
-      console.log("💓 heartbeat alive");
+      console.log("💓 alive");
     }
   }, 10000);
 }
