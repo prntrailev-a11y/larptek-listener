@@ -1,99 +1,110 @@
+import { Connection, PublicKey } from "@solana/web3.js";
+
+// =====================
+// ENV CHECK
+// =====================
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 
 if (!HELIUS_API_KEY) {
   throw new Error("Missing HELIUS_API_KEY");
 }
 
-// Pump.fun program id (VERIFY THIS IS CORRECT)
-const PUMPFUN_PROGRAM_ID =
-  process.env.PUMPFUN_PROGRAM_ID ||
-  "6EF8nqHh...REPLACE_WITH_REAL_ID";
+// =====================
+// CONFIG
+// =====================
+const HELIUS_WSS = `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 
-// Helius RPC HTTPS endpoint (IMPORTANT)
-const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+// Pump.fun program (commonly used ID)
+const PUMPFUN_PROGRAM_ID = new PublicKey(
+  "6EF8rrecthX6a2L1F8qKpK7R7p3z6c3w1vG6v6V8pump"
+);
 
-// track last signature so we don’t double process
-let lastSignature = null;
+// SPL Token Program (for mint detection)
+const TOKEN_PROGRAM_ID = new PublicKey(
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+);
 
-async function fetchLatestSignatures() {
-  const res = await fetch(RPC_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "getSignaturesForAddress",
-      params: [
-        PUMPFUN_PROGRAM_ID,
-        {
-          limit: 20,
-        },
-      ],
-    }),
-  });
+// =====================
+// CONNECTION
+// =====================
+const connection = new Connection(HELIUS_WSS, {
+  commitment: "confirmed",
+});
 
-  const json = await res.json();
-  return json.result || [];
+console.log("🚀 Pump.fun listener (true activity mode) running...");
+console.log("🔌 Connecting to Helius...");
+
+// =====================
+// HELPERS
+// =====================
+function isMintLog(logs) {
+  return logs.some((log) =>
+    log.includes("InitializeMint") ||
+    log.includes("initializeMint")
+  );
 }
 
-async function fetchTransaction(signature) {
-  const res = await fetch(RPC_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "getTransaction",
-      params: [
-        signature,
-        {
-          encoding: "jsonParsed",
-          maxSupportedTransactionVersion: 0,
-        },
-      ],
-    }),
-  });
-
-  const json = await res.json();
-  return json.result;
+function isPumpFunLog(logs) {
+  return logs.some((log) =>
+    log.toLowerCase().includes("pump") ||
+    log.toLowerCase().includes("mint")
+  );
 }
 
-async function loop() {
-  console.log("🚀 Pump.fun listener (RPC mode) running...");
+// =====================
+// MAIN LISTENERS
+// =====================
 
-  setInterval(async () => {
-    try {
-      const sigs = await fetchLatestSignatures();
+// 1. Pump.fun program activity
+connection.onLogs(
+  PUMPFUN_PROGRAM_ID,
+  (logInfo) => {
+    console.log("🔥 Pump.fun activity detected");
+    console.log(logInfo.signature);
+  },
+  "confirmed"
+);
 
-      for (const sig of sigs) {
-        if (sig.signature === lastSignature) break;
+// 2. Global mint detection (SPL Token Program)
+connection.onLogs(
+  TOKEN_PROGRAM_ID,
+  (logInfo) => {
+    const logs = logInfo.logs || [];
 
-        lastSignature = sig.signature;
-
-        const tx = await fetchTransaction(sig.signature);
-        if (!tx) continue;
-
-        const logs = tx?.meta?.logMessages || [];
-
-        // TRUE pump.fun filter (no noise)
-        const isPumpFun = logs.some((l) =>
-          l.toLowerCase().includes("pump")
-        );
-
-        if (!isPumpFun) continue;
-
-        console.log("\n🔥 PUMP.FUN TX:", sig.signature);
-
-        const mint =
-          logs.find((l) => l.includes("mint")) ||
-          "unknown mint";
-
-        console.log("🧬", mint);
-      }
-    } catch (err) {
-      console.error("loop error:", err.message);
+    if (isMintLog(logs)) {
+      console.log("🪙 New mint detected");
+      console.log("📊 Log match: initializeMint");
+      console.log(logInfo.signature);
     }
-  }, 2000);
-}
+  },
+  "confirmed"
+);
 
-loop();
+// 3. Backup broad filter (catches weird Pump.fun variants)
+connection.onLogs(
+  "all",
+  (logInfo) => {
+    const logs = logInfo.logs || [];
+
+    if (isPumpFunLog(logs)) {
+      console.log("🔥 Pump.fun activity detected");
+      console.log(logInfo.signature);
+    }
+  },
+  "confirmed"
+);
+
+// =====================
+// CONNECTION STATUS
+// =====================
+connection._rpcWebSocket.on("open", () => {
+  console.log("✅ WebSocket connected");
+});
+
+connection._rpcWebSocket.on("error", (err) => {
+  console.error("❌ WebSocket error:", err);
+});
+
+connection._rpcWebSocket.on("close", () => {
+  console.log("⚠️ WebSocket closed — reconnect recommended");
+});
