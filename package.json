@@ -2,10 +2,6 @@
   "name": "larptek-listener",
   "version": "1.0.0",
   "type": "module",
-  "main": "listener.js",
-  "scripts": {
-    "start": "node listener.js"
-  },
   "dependencies": {
     "ws": "^8.18.0"
   }
