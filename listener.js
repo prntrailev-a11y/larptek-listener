@@ -1,85 +1,90 @@
 import WebSocket from "ws";
 
 const HELIUS_KEY = process.env.HELIUS_KEY;
-const BASE44_URL = process.env.BASE44_URL;
-const INGEST_SECRET = process.env.INGEST_SECRET;
 
-// Pump.fun program ID (mainnet)
-const PUMP_PROGRAM_ID = "6EF8rrecthR4k7kqgKQz7z5b5b5b5b5b5b5b5b5"; // placeholder, I’ll fix if you want exact
+if (!HELIUS_KEY) {
+  console.error("❌ Missing HELIUS_KEY in environment variables");
+  process.exit(1);
+}
 
 const WS_URL = `wss://atlas-mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`;
 
-function connect() {
-  console.log("Connecting to Helius...");
+console.log("🚀 Starting Helius debug listener...");
+console.log("🔌 Connecting to:", WS_URL);
 
+function connect() {
   const ws = new WebSocket(WS_URL);
 
   ws.on("open", () => {
-    console.log("Connected to Helius");
+    console.log("✅ WebSocket connected");
 
-    // Subscribe to logs (pump program activity)
-    ws.send(JSON.stringify({
+    const subscribeMsg = {
       jsonrpc: "2.0",
       id: 1,
       method: "logsSubscribe",
       params: [
         {
-          mentions: [PUMP_PROGRAM_ID]
+          // FIREHOSE MODE (no filters)
+          mentions: []
         },
         {
           commitment: "confirmed"
         }
       ]
-    }));
+    };
+
+    console.log("📡 Sending subscription:");
+    console.log(JSON.stringify(subscribeMsg, null, 2));
+
+    ws.send(JSON.stringify(subscribeMsg));
+
+    console.log("⏳ Listening for messages...");
   });
 
-  ws.on("message", async (raw) => {
+  ws.on("message", (raw) => {
     try {
-      const msg = JSON.parse(raw.toString());
+      const msg = raw.toString();
 
-      const log = msg?.params?.result;
+      console.log("\n🔥 RAW MESSAGE RECEIVED:");
+      console.log(msg.slice(0, 1000));
 
-      if (!log) return;
+      // Try parse (optional safety)
+      try {
+        const parsed = JSON.parse(msg);
 
-      const signature = log.value?.signature;
-      const logs = log.value?.logs || [];
+        if (parsed?.params?.result) {
+          console.log("\n📦 PARSED EVENT:");
+          console.log(JSON.stringify(parsed.params.result, null, 2));
+        }
+      } catch (e) {
+        // ignore JSON parse errors
+      }
 
-      // crude mint detection (we refine later)
-      const isLaunch =
-        logs.some(l => l.includes("InitializeMint")) ||
-        logs.some(l => l.includes("CreateAccount"));
-
-      if (!isLaunch) return;
-
-      console.log("New potential launch:", signature);
-
-      await fetch(BASE44_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-ingest-secret": INGEST_SECRET
-        },
-        body: JSON.stringify({
-          signature,
-          source: "helius",
-          timestamp: new Date().toISOString()
-        })
-      });
-
-    } catch (e) {
-      console.error("Error:", e);
+    } catch (err) {
+      console.error("❌ Message handling error:", err);
     }
   });
 
   ws.on("close", () => {
-    console.log("Reconnecting...");
+    console.log("⚠️ WebSocket closed. Reconnecting in 2s...");
     setTimeout(connect, 2000);
   });
 
-  ws.on("error", (e) => {
-    console.error("WS error", e);
+  ws.on("error", (err) => {
+    console.error("❌ WebSocket error:", err.message);
     ws.close();
   });
+
+  // heartbeat (detect silent failure)
+  const interval = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      console.log("💓 heartbeat: ws alive");
+    } else {
+      console.log("⚠️ heartbeat: ws not open");
+    }
+  }, 10000);
+
+  ws.on("close", () => clearInterval(interval));
 }
 
 connect();
