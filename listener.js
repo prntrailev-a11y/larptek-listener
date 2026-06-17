@@ -1,127 +1,197 @@
 import WebSocket from "ws";
+import fetch from "node-fetch";
 
-// ================= CONFIG =================
 const HELIUS_KEY = process.env.HELIUS_KEY;
-const INGEST_URL = process.env.INGEST_URL;
-const INGEST_SECRET = process.env.INGEST_SECRET;
 
-// pump.fun program id
-const PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+// Pump.fun program ID (mainnet)
+const PUMP_PROGRAM_ID =
+  "6EF8rrecthR5Dkzon8QwB6zQ1e3z1b9Yq8Fq3Y6Q6ZQp";
 
-// ================= HELPERS =================
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Helius endpoints
+const RPC_HTTP = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`;
+const RPC_WSS = `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`;
 
-function parse(msg) {
-  try {
-    return JSON.parse(msg);
-  } catch {
-    return null;
-  }
-}
+// Simple dedupe cache (prevents re-processing same tx)
+const seenSignatures = new Set();
 
-// extract mint-like base58 string from logs
-function extractMint(logs = []) {
-  for (const l of logs) {
-    const match = l.match(/[1-9A-HJ-NP-Za-km-z]{32,44}/);
-    if (match) return match[0];
-  }
-  return null;
-}
+// -----------------------------
+// START
+// -----------------------------
+console.log("🚀 Larptek Helius Pump.fun Listener Starting...");
+console.log("🔌 Connecting to Helius...");
 
-// simple signal scoring
-function classify(logs = []) {
-  const text = logs.join(" ").toLowerCase();
+// -----------------------------
+// WEBSOCKET
+// -----------------------------
+const ws = new WebSocket(RPC_WSS);
 
-  let score = 0;
-  if (text.includes("initialize")) score += 2;
-  if (text.includes("mint")) score += 2;
-  if (text.includes("create")) score += 1;
-  if (text.includes("buy")) score += 3;
+ws.on("open", () => {
+  console.log("✅ WebSocket connected");
 
-  return score >= 5;
-}
-
-// send to base44
-async function ingest(payload) {
-  try {
-    await fetch(INGEST_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-ingest-secret": INGEST_SECRET,
-      },
-      body: JSON.stringify(payload),
-    });
-  } catch (e) {
-    console.log("ingest error:", e.message);
-  }
-}
-
-// ================= MAIN =================
-function start() {
-  console.log("🚀 Starting Larptek Helius Listener...");
-
-  const ws = new WebSocket(
-    `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`
-  );
-
-  ws.on("open", () => {
-    console.log("✅ Connected to Helius");
-
-    // ✅ CORRECT logsSubscribe format (THIS FIXES YOUR ERRORS)
-    const subscribeMsg = {
+  ws.send(
+    JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
       method: "logsSubscribe",
       params: [
         {
-          mentions: [PUMP_FUN_PROGRAM]
+          mentions: [PUMP_PROGRAM_ID],
         },
         {
-          commitment: "confirmed"
-        }
-      ]
-    };
+          commitment: "processed",
+        },
+      ],
+    })
+  );
+});
 
-    console.log("📡 Subscribing to pump.fun logs...");
-    ws.send(JSON.stringify(subscribeMsg));
-  });
+// -----------------------------
+// MESSAGE HANDLER
+// -----------------------------
+ws.on("message", async (data) => {
+  try {
+    const msg = JSON.parse(data.toString());
 
-  ws.on("message", async (data) => {
-    const msg = parse(data.toString());
-    if (!msg?.params?.result?.value) return;
+    const result = msg?.params?.result;
+    if (!result) return;
 
-    const value = msg.params.result.value;
-    const logs = value.logs || [];
-    const signature = value.signature;
+    const signature = result?.value?.signature;
+    if (!signature) return;
 
-    console.log("\n🔥 TX:", signature);
+    // dedupe
+    if (seenSignatures.has(signature)) return;
+    seenSignatures.add(signature);
 
-    const isLaunch = classify(logs);
-    if (!isLaunch) return;
+    console.log(`\n🔥 TX: ${signature}`);
 
-    const mint = extractMint(logs);
+    const tx = await fetchTransaction(signature);
+    if (!tx) return;
+
+    const launch = extractLaunch(tx, signature);
+
+    if (launch) {
+      await ingestSafe(launch);
+    }
+  } catch (err) {
+    console.error("❌ message error:", err.message);
+  }
+});
+
+// -----------------------------
+// FETCH TX
+// -----------------------------
+async function fetchTransaction(signature) {
+  try {
+    const res = await fetch(RPC_HTTP, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getTransaction",
+        params: [
+          signature,
+          {
+            encoding: "jsonParsed",
+            commitment: "processed",
+            maxSupportedTransactionVersion: 0,
+          },
+        ],
+      }),
+    });
+
+    const json = await res.json();
+    return json?.result || null;
+  } catch (err) {
+    console.error("❌ fetchTransaction error:", err.message);
+    return null;
+  }
+}
+
+// -----------------------------
+// LAUNCH EXTRACTION
+// -----------------------------
+function extractLaunch(tx, signature) {
+  try {
+    const instructions =
+      tx?.transaction?.message?.instructions || [];
+
+    let mint = null;
+    let isPump = false;
+
+    for (const ix of instructions) {
+      const programId = ix?.programId?.toString?.();
+
+      // Only care about pump.fun program
+      if (programId === PUMP_PROGRAM_ID) {
+        isPump = true;
+      }
+
+      // Extract mint from parsed token instructions
+      const parsed = ix?.parsed;
+      if (parsed?.type === "initializeMint") {
+        mint = parsed?.info?.mint;
+      }
+
+      if (parsed?.type === "mintTo") {
+        mint = parsed?.info?.mint;
+      }
+    }
+
+    // HARD FILTER: must be pump.fun related
+    if (!isPump) return null;
+
+    if (!mint) {
+      console.log("⚠️ pump tx but no mint found");
+      return null;
+    }
 
     console.log("🧬 mint:", mint);
 
-    await ingest({
-      mint,
+    return {
       signature,
-      logs,
-      detected_at: new Date().toISOString(),
-      source: "helius_pump_listener"
-    });
-  });
-
-  ws.on("close", async () => {
-    console.log("❌ WS closed — reconnecting...");
-    await sleep(3000);
-    start();
-  });
-
-  ws.on("error", (err) => {
-    console.log("❌ WS error:", err.message);
-  });
+      mint,
+      timestamp: Date.now(),
+      source: "pump.fun",
+    };
+  } catch (err) {
+    console.error("❌ extractLaunch error:", err.message);
+    return null;
+  }
 }
 
-start();
+// -----------------------------
+// INGEST SAFE
+// -----------------------------
+async function ingestSafe(launch) {
+  try {
+    if (!launch?.mint || !launch?.signature) return;
+
+    // replace this with your real pipeline
+    await ingestRawLaunch(launch);
+
+    console.log("📦 ingested launch:", launch.mint);
+  } catch (err) {
+    console.error("❌ ingest error:", err.message);
+  }
+}
+
+// -----------------------------
+// PLACEHOLDER INGEST FUNCTION
+// -----------------------------
+async function ingestRawLaunch(launch) {
+  // Replace with DB / queue / API call
+  console.log("➡️ ingestRawLaunch:", launch);
+}
+
+// -----------------------------
+// RECONNECT
+// -----------------------------
+ws.on("close", () => {
+  console.log("❌ WebSocket closed — reconnecting in 3s...");
+  setTimeout(() => process.exit(1), 3000);
+});
+
+ws.on("error", (err) => {
+  console.error("❌ WebSocket error:", err.message);
+});
