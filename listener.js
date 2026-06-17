@@ -3,14 +3,15 @@ import WebSocket from "ws";
 const HELIUS_KEY = process.env.HELIUS_KEY;
 
 if (!HELIUS_KEY) {
-  console.error("❌ Missing HELIUS_KEY in environment variables");
+  console.error("❌ Missing HELIUS_KEY");
   process.exit(1);
 }
 
+// Helius WS endpoint
 const WS_URL = `wss://atlas-mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`;
 
-console.log("🚀 Starting Helius debug listener...");
-console.log("🔌 Connecting to:", WS_URL);
+console.log("🚀 Starting Larptek Helius Listener...");
+console.log("🔌 Connecting:", WS_URL);
 
 function connect() {
   const ws = new WebSocket(WS_URL);
@@ -18,73 +19,79 @@ function connect() {
   ws.on("open", () => {
     console.log("✅ WebSocket connected");
 
+    /**
+     * VALID HELIUS SUBSCRIPTION:
+     * We use transactionsSubscribe with broad filters
+     */
     const subscribeMsg = {
       jsonrpc: "2.0",
       id: 1,
-      method: "logsSubscribe",
+      method: "transactionsSubscribe",
       params: [
         {
-          // FIREHOSE MODE (no filters)
-          mentions: []
+          vote: false,
+          failed: false,
+          accountInclude: [] // empty = all accounts (firehose mode)
         },
         {
-          commitment: "confirmed"
+          commitment: "confirmed",
+          encoding: "jsonParsed",
+          transactionDetails: "full",
+          showRewards: false,
+          maxSupportedTransactionVersion: 0
         }
       ]
     };
 
-    console.log("📡 Sending subscription:");
+    console.log("📡 Sending subscription...");
     console.log(JSON.stringify(subscribeMsg, null, 2));
 
     ws.send(JSON.stringify(subscribeMsg));
 
-    console.log("⏳ Listening for messages...");
+    console.log("⏳ Listening for Solana transactions...");
   });
 
   ws.on("message", (raw) => {
     try {
       const msg = raw.toString();
 
-      console.log("\n🔥 RAW MESSAGE RECEIVED:");
-      console.log(msg.slice(0, 1000));
+      console.log("\n🔥 RAW EVENT RECEIVED:");
+      console.log(msg.slice(0, 1500));
 
-      // Try parse (optional safety)
       try {
         const parsed = JSON.parse(msg);
 
         if (parsed?.params?.result) {
-          console.log("\n📦 PARSED EVENT:");
+          console.log("\n📦 TRANSACTION DATA:");
           console.log(JSON.stringify(parsed.params.result, null, 2));
         }
       } catch (e) {
-        // ignore JSON parse errors
+        // ignore parse errors
       }
 
     } catch (err) {
-      console.error("❌ Message handling error:", err);
+      console.error("❌ Error handling message:", err);
     }
   });
 
   ws.on("close", () => {
-    console.log("⚠️ WebSocket closed. Reconnecting in 2s...");
+    console.log("⚠️ WS closed → reconnecting...");
     setTimeout(connect, 2000);
   });
 
   ws.on("error", (err) => {
-    console.error("❌ WebSocket error:", err.message);
+    console.error("❌ WS error:", err.message);
     ws.close();
   });
 
-  // heartbeat (detect silent failure)
-  const interval = setInterval(() => {
+  // heartbeat
+  setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
-      console.log("💓 heartbeat: ws alive");
+      console.log("💓 heartbeat: alive");
     } else {
-      console.log("⚠️ heartbeat: ws not open");
+      console.log("⚠️ heartbeat: not connected");
     }
   }, 10000);
-
-  ws.on("close", () => clearInterval(interval));
 }
 
 connect();
