@@ -1,17 +1,19 @@
 import WebSocket from "ws";
-import fetch from "node-fetch";
 
+// -----------------------------
+// CONFIG
+// -----------------------------
 const HELIUS_KEY = process.env.HELIUS_KEY;
 
 // Pump.fun program ID (mainnet)
 const PUMP_PROGRAM_ID =
   "6EF8rrecthR5Dkzon8QwB6zQ1e3z1b9Yq8Fq3Y6Q6ZQp";
 
-// Helius endpoints
+// RPC endpoints
 const RPC_HTTP = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`;
 const RPC_WSS = `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_KEY}`;
 
-// Simple dedupe cache (prevents re-processing same tx)
+// Deduplication
 const seenSignatures = new Set();
 
 // -----------------------------
@@ -51,14 +53,13 @@ ws.on("open", () => {
 ws.on("message", async (data) => {
   try {
     const msg = JSON.parse(data.toString());
-
     const result = msg?.params?.result;
+
     if (!result) return;
 
     const signature = result?.value?.signature;
     if (!signature) return;
 
-    // dedupe
     if (seenSignatures.has(signature)) return;
     seenSignatures.add(signature);
 
@@ -78,7 +79,7 @@ ws.on("message", async (data) => {
 });
 
 // -----------------------------
-// FETCH TX
+// FETCH TRANSACTION (native fetch)
 // -----------------------------
 async function fetchTransaction(signature) {
   try {
@@ -122,13 +123,12 @@ function extractLaunch(tx, signature) {
     for (const ix of instructions) {
       const programId = ix?.programId?.toString?.();
 
-      // Only care about pump.fun program
       if (programId === PUMP_PROGRAM_ID) {
         isPump = true;
       }
 
-      // Extract mint from parsed token instructions
       const parsed = ix?.parsed;
+
       if (parsed?.type === "initializeMint") {
         mint = parsed?.info?.mint;
       }
@@ -138,7 +138,6 @@ function extractLaunch(tx, signature) {
       }
     }
 
-    // HARD FILTER: must be pump.fun related
     if (!isPump) return null;
 
     if (!mint) {
@@ -161,13 +160,12 @@ function extractLaunch(tx, signature) {
 }
 
 // -----------------------------
-// INGEST SAFE
+// SAFE INGEST
 // -----------------------------
 async function ingestSafe(launch) {
   try {
     if (!launch?.mint || !launch?.signature) return;
 
-    // replace this with your real pipeline
     await ingestRawLaunch(launch);
 
     console.log("📦 ingested launch:", launch.mint);
@@ -177,10 +175,9 @@ async function ingestSafe(launch) {
 }
 
 // -----------------------------
-// PLACEHOLDER INGEST FUNCTION
+// INGEST PLACEHOLDER
 // -----------------------------
 async function ingestRawLaunch(launch) {
-  // Replace with DB / queue / API call
   console.log("➡️ ingestRawLaunch:", launch);
 }
 
@@ -188,7 +185,7 @@ async function ingestRawLaunch(launch) {
 // RECONNECT
 // -----------------------------
 ws.on("close", () => {
-  console.log("❌ WebSocket closed — reconnecting in 3s...");
+  console.log("❌ WebSocket closed — restarting...");
   setTimeout(() => process.exit(1), 3000);
 });
 
