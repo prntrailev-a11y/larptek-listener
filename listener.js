@@ -11,7 +11,7 @@ if (!HELIUS_API_KEY || !BASE44_INGEST_URL || !INGEST_SECRET) {
     process.exit(1);
 }
 
-const HELIUS_WS_URL = `wss://atlas.helius.xyz/?api-key=${HELIUS_API_KEY}`;
+const HELIUS_WS_URL = `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecth7Q6z28ba6tDi5Exg1H69Umupg7N6Z47N5f";
 
