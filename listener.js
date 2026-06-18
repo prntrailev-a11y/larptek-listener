@@ -1,142 +1,95 @@
-import { Connection } from "@solana/web3.js";
+import { Connection, clusterApiUrl } from "@solana/web3.js";
 
-// ===== CONFIG =====
-const RPC_URL = process.env.RPC_URL;
-const connection = new Connection(RPC_URL, "confirmed");
+const connection = new Connection(process.env.RPC_URL || clusterApiUrl("mainnet-beta"), "confirmed");
 
-// Optional: track processed txs to avoid duplicates
-const seen = new Set();
+// prevent duplicates
+const processed = new Set();
 
-// ===== LOG HELPERS =====
-function log(...args) {
-  console.log(`[LOG]`, ...args);
+function sleep(ms) {
+  return new Promise(res => setTimeout(res, ms));
 }
 
-function warn(...args) {
-  console.warn(`[WARN]`, ...args);
-}
+async function getTxWithRetry(signature, retries = 3) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      const tx = await connection.getTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: "confirmed",
+      });
 
-// ===== LAUNCH DETECTOR (FIXED) =====
-function isLaunchTx(logs) {
-  if (!logs || !Array.isArray(logs)) return false;
-
-  const text = logs.join(" ").toLowerCase();
-
-  const launchKeywords = [
-    "initialize",
-    "init mint",
-    "initialize mint",
-    "create",
-    "create account",
-    "initialize account",
-    "mint",
-    "bonding curve",
-    "curve",
-    "liquidity",
-    "lp",
-    "pool",
-    "raydium",
-    "openbook",
-    "dex",
-    "token created",
-    "new token"
-  ];
-
-  const hasLaunchSignal = launchKeywords.some(k => text.includes(k));
-
-  const isSellHeavy =
-    text.includes("instruction: sell") ||
-    text.includes("instruction: swap");
-
-  const hasTokenPrograms =
-    text.includes("tokenkeg") ||
-    text.includes("tokenzq") ||
-    text.includes("spl-token");
-
-  const score =
-    (hasLaunchSignal ? 2 : 0) +
-    (hasTokenPrograms ? 1 : 0) +
-    (isSellHeavy ? -2 : 0);
-
-  const decision = score >= 2;
-
-  log("🧠 Launch score:", score, "| decision:", decision);
-  log("🧪 Signals:", {
-    hasLaunchSignal,
-    hasTokenPrograms,
-    isSellHeavy,
-  });
-
-  return decision;
-}
-
-// ===== FETCH TX =====
-async function getTx(signature) {
-  try {
-    const tx = await connection.getParsedTransaction(signature, {
-      maxSupportedTransactionVersion: 0,
-    });
-
-    if (!tx) {
-      warn("No tx returned");
-      return null;
+      if (tx) return tx;
+    } catch (e) {
+      console.log(`[WARN] RPC error retry ${i + 1}:`, e.message);
     }
 
-    return tx;
-  } catch (err) {
-    console.error("❌ Error fetching tx:", err.message);
-    return null;
+    await sleep(150 * (i + 1));
   }
+  return null;
 }
 
-// ===== PROCESS TX =====
-async function processTx(signature) {
-  if (seen.has(signature)) return;
-  seen.add(signature);
+function isLaunchTx(logs = []) {
+  if (!logs || !logs.length) return false;
 
-  log("📩 TX RECEIVED:", signature);
+  const text = logs.join(" ");
 
-  const tx = await getTx(signature);
-  if (!tx) return;
+  const signals = [
+    "Instruction: Sell",
+    "Instruction: Buy",
+    "TransferChecked",
+    "GetFees",
+    "pfee",
+    "GMgn",
+    "6EF8",
+    "token program",
+  ];
 
-  const logs = tx.meta?.logMessages;
+  let score = 0;
 
-  if (!logs) {
-    warn("No logs found");
+  for (const s of signals) {
+    if (text.includes(s)) score++;
+  }
+
+  // require at least 2 signals for confidence
+  return score >= 2;
+}
+
+function classifyTx(logs = []) {
+  const text = logs.join(" ");
+
+  if (text.includes("Instruction: Sell")) return "sell";
+  if (text.includes("Instruction: Buy")) return "buy";
+  if (text.includes("TransferChecked")) return "transfer";
+  return "unknown";
+}
+
+// MAIN LISTENER
+export async function handleSignature(signature) {
+  if (processed.has(signature)) return;
+  processed.add(signature);
+
+  console.log(`[LOG] 🔎 Processing signature: ${signature}`);
+
+  const tx = await getTxWithRetry(signature);
+
+  if (!tx) {
+    console.log("[WARN] No tx returned after retries");
     return;
   }
 
-  log("📜 Logs sample:", logs.slice(0, 8));
+  const logs = tx?.meta?.logMessages || [];
 
-  const isLaunch = isLaunchTx(logs);
+  console.log("[LOG] 📜 Logs sample:", logs.slice(0, 10));
 
-  if (!isLaunch) {
-    log("⛔ Not a launch tx");
-    return null;
+  if (!isLaunchTx(logs)) {
+    console.log("[LOG] ⛔ Not a launch tx");
+    return;
   }
 
-  log("🚀 LAUNCH DETECTED:", signature);
+  const type = classifyTx(logs);
 
-  // You can plug your bot / sniper logic here
-  // e.g. send alert, execute trade, etc.
+  console.log(`[LOG] 🚀 LAUNCH DETECTED | Type: ${type}`);
+  console.log(`[LOG] TX: ${signature}`);
+
+  // 👉 PLACE YOUR ALERT / WEBHOOK HERE
+  // await sendAlert({ signature, type, logs });
 }
-
-// ===== MOCK STREAM (replace with your websocket/subscription) =====
-function startListener() {
-  log("🚀 Listener started...");
-
-  // Example: replace with real subscription
-  connection.onLogs("all", async (logInfo) => {
-    try {
-      const signature = logInfo.signature;
-      if (!signature) return;
-
-      await processTx(signature);
-    } catch (err) {
-      console.error("❌ Listener error:", err.message);
-    }
-  });
-}
-
-// ===== START =====
-startListener();
