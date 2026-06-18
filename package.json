@@ -1,16 +1,13 @@
 {
   "name": "larptek-listener",
   "version": "1.0.0",
-  "description": "Real-time streaming worker feeding new pump.fun token launches to base44",
+  "description": "Solana Helius to base44 ingestion engine",
   "main": "listener.js",
   "scripts": {
     "start": "node listener.js"
   },
   "dependencies": {
-    "ws": "^8.18.0",
-    "dotenv": "^16.4.5"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0"
   }
 }
