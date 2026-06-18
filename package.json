@@ -1,18 +1,16 @@
 {
   "name": "larptek-listener",
   "version": "1.0.0",
-  "type": "module",
+  "description": "Real-time streaming worker feeding new pump.fun token launches to base44",
+  "main": "listener.js",
   "scripts": {
     "start": "node listener.js"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.98.0",
-    "axios": "^1.8.4",
-    "dotenv": "^16.4.7",
-    "uuid": "9.0.1",
-    "ws": "^8.18.1"
+    "ws": "^8.18.0",
+    "dotenv": "^16.4.5"
   },
-  "overrides": {
-    "uuid": "9.0.1"
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
