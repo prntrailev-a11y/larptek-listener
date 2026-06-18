@@ -1,5 +1,5 @@
 {
-  "name": "solana-listener",
+  "name": "larptek-listener",
   "version": "1.0.0",
   "type": "module",
   "main": "listener.js",
@@ -7,7 +7,8 @@
     "start": "node listener.js"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.95.0",
-    "dotenv": "^16.4.5"
+    "axios": "^1.8.4",
+    "dotenv": "^16.4.7",
+    "ws": "^8.18.1"
   }
 }
