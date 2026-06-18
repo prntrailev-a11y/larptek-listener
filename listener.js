@@ -1,110 +1,44 @@
-import { Connection, PublicKey } from "@solana/web3.js";
+import 'dotenv/config';
+import { Connection } from "@solana/web3.js";
 
-// =====================
-// ENV CHECK
-// =====================
+// ---- ENV SAFETY CHECKS ----
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
+const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL;
 
+// hard fail with clear message
 if (!HELIUS_API_KEY) {
-  throw new Error("Missing HELIUS_API_KEY");
+  throw new Error("Missing HELIUS_API_KEY in environment variables");
 }
 
-// =====================
-// CONFIG
-// =====================
-const HELIUS_WSS = `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+// If you provide full RPC URL, use it.
+// Otherwise build it from API key.
+let rpcUrl = HELIUS_RPC_URL;
 
-// Pump.fun program (commonly used ID)
-const PUMPFUN_PROGRAM_ID = new PublicKey(
-  "6EF8rrecthX6a2L1F8qKpK7R7p3z6c3w1vG6v6V8pump"
-);
-
-// SPL Token Program (for mint detection)
-const TOKEN_PROGRAM_ID = new PublicKey(
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
-);
-
-// =====================
-// CONNECTION
-// =====================
-const connection = new Connection(HELIUS_WSS, {
-  commitment: "confirmed",
-});
-
-console.log("🚀 Pump.fun listener (true activity mode) running...");
-console.log("🔌 Connecting to Helius...");
-
-// =====================
-// HELPERS
-// =====================
-function isMintLog(logs) {
-  return logs.some((log) =>
-    log.includes("InitializeMint") ||
-    log.includes("initializeMint")
-  );
+if (!rpcUrl) {
+  rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 }
 
-function isPumpFunLog(logs) {
-  return logs.some((log) =>
-    log.toLowerCase().includes("pump") ||
-    log.toLowerCase().includes("mint")
-  );
+// validate URL
+if (!rpcUrl.startsWith("http://") && !rpcUrl.startsWith("https://")) {
+  throw new Error(`Invalid RPC URL: ${rpcUrl}`);
 }
 
-// =====================
-// MAIN LISTENERS
-// =====================
+console.log("Using RPC:", rpcUrl);
 
-// 1. Pump.fun program activity
-connection.onLogs(
-  PUMPFUN_PROGRAM_ID,
-  (logInfo) => {
-    console.log("🔥 Pump.fun activity detected");
-    console.log(logInfo.signature);
-  },
-  "confirmed"
-);
+// ---- SOLANA CONNECTION ----
+const connection = new Connection(rpcUrl, "confirmed");
 
-// 2. Global mint detection (SPL Token Program)
-connection.onLogs(
-  TOKEN_PROGRAM_ID,
-  (logInfo) => {
-    const logs = logInfo.logs || [];
+// ---- BASIC KEEP-ALIVE TEST ----
+async function testConnection() {
+  try {
+    const slot = await connection.getSlot();
+    console.log("Connected. Current slot:", slot);
+  } catch (err) {
+    console.error("RPC connection failed:", err);
+  }
+}
 
-    if (isMintLog(logs)) {
-      console.log("🪙 New mint detected");
-      console.log("📊 Log match: initializeMint");
-      console.log(logInfo.signature);
-    }
-  },
-  "confirmed"
-);
+testConnection();
 
-// 3. Backup broad filter (catches weird Pump.fun variants)
-connection.onLogs(
-  "all",
-  (logInfo) => {
-    const logs = logInfo.logs || [];
-
-    if (isPumpFunLog(logs)) {
-      console.log("🔥 Pump.fun activity detected");
-      console.log(logInfo.signature);
-    }
-  },
-  "confirmed"
-);
-
-// =====================
-// CONNECTION STATUS
-// =====================
-connection._rpcWebSocket.on("open", () => {
-  console.log("✅ WebSocket connected");
-});
-
-connection._rpcWebSocket.on("error", (err) => {
-  console.error("❌ WebSocket error:", err);
-});
-
-connection._rpcWebSocket.on("close", () => {
-  console.log("⚠️ WebSocket closed — reconnect recommended");
-});
+// ---- YOUR LISTENER LOGIC BELOW ----
+// (keep your existing logic, just paste it under this)
