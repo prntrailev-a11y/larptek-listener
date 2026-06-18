@@ -21,21 +21,19 @@ function connectStream() {
     const ws = new WebSocket(HELIUS_WS_URL);
 
     ws.on('open', function open() {
-        console.log(`🚀 STREAM LIVE: Connected to Helius RPC WS. Monitoring all Pump.fun events...`);
+        console.log(`🚀 STREAM LIVE: Connected to Helius RPC WS. Monitoring all Pump.fun deployments...`);
         
-        // Subscribe to every transaction touching Pump.fun
         const subscriptionRequest = {
             jsonrpc: "2.0",
             id: 1,
             method: "logsSubscribe",
             params: [
                 { mentions: [PUMP_FUN_PROGRAM_ID] },
-                { commitment: "processed" } // "processed" catches it the fastest millisecond it happens
+                { commitment: "processed" } // Maximum velocity streaming state
             ]
         };
         ws.send(JSON.stringify(subscriptionRequest));
 
-        // Keepalive logging
         clearInterval(heartbeatInterval);
         heartbeatInterval = setInterval(() => {
             console.log(`[Heartbeat] Stream healthy. Listening for next Pump.fun deployment block...`);
@@ -47,20 +45,25 @@ function connectStream() {
             const parsed = JSON.parse(data);
             if (!parsed.params?.result?.value) return;
             
-            // CRITICAL: Drop failed transactions immediately to ignore spam/failed bots
+            // Instantly skip failed runtime execution to optimize performance
             if (parsed.params.result.value.err !== null) return; 
 
             const { signature, logs } = parsed.params.result.value;
             if (!logs) return;
             
-            // Double check log arrays for creation hooks (covers both upper and lowercase anomalies)
+            // Dual verification checking text blocks for instruction roots
             const logString = logs.join(" ").toLowerCase();
-            const isCreationTx = logString.includes("create") || logString.includes("initialize");
+            const isCreationTx = logString.includes("create") || 
+                                 logString.includes("initialize") || 
+                                 logString.includes("instruction: create");
             
             if (isCreationTx) {
-                // Instantly pass to parser so we don't stall the network connection stream
+                // Instantly pass off to parser without blocking the WS loop
                 parseLaunchTransaction(signature).catch(err => {
-                    console.error(`❌ Parse error for tx ${signature}:`, err.message);
+                    // Suppress standard log noise if transaction isn't fully confirmed yet
+                    if (!err.message.includes("null")) {
+                        console.error(`❌ Parse error for tx ${signature.slice(0,8)}:`, err.message);
+                    }
                 });
             }
         } catch (err) {
@@ -72,12 +75,15 @@ function connectStream() {
     
     ws.on('close', () => {
         clearInterval(heartbeatInterval);
-        console.log('⚠️ Stream disconnected. Initiating structural reconnection in 3 seconds...');
+        console.log('⚠️ Stream disconnected. Reconnecting in 3 seconds...');
         setTimeout(connectStream, 3000);
     });
 }
 
 async function parseLaunchTransaction(signature) {
+    // Small propagation delay window (200ms) to ensure RPC has indexed the transaction data
+    await new Promise(resolve => setTimeout(resolve, 200));
+
     const response = await fetch(HELIUS_RPC_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -98,31 +104,33 @@ async function parseLaunchTransaction(signature) {
 
     const txData = await response.json();
     const tx = txData.result;
+    
+    // Safety exit clause if transaction fetch yields temporary blank state
     if (!tx || !tx.transaction?.message?.accountKeys) return;
 
     const accountKeys = tx.transaction.message.accountKeys;
     
-    // Unpack structural accounts safely
+    // Extract the primary dynamic address keys from structural indexing arrays
     const mintAccount = accountKeys[0];
     const mintAddress = typeof mintAccount === 'object' ? mintAccount.pubkey : mintAccount;
     
     const deployerAccount = accountKeys[2];
     const deployerAddress = typeof deployerAccount === 'object' ? deployerAccount.pubkey : deployerAccount;
 
-    // Strict validation rule: Pump.fun mints must end in "pump"
+    // Hard verification rule: Token mint must possess standard Pump layout parameters
     if (mintAddress && mintAddress.endsWith('pump')) {
         
         const base44Payload = {
             mint: mintAddress,
-            deployer: deployerAddress, // Tracks the wallet who launched it / bought first
+            deployer: deployerAddress || "Unknown Creator", 
             name: "Pump.fun Verified Launch", 
             symbol: "PUMP",
-            mcap: 4500, // Native standard floor capitalization 
+            mcap: 4500, 
             launched: new Date().toISOString(),
             signature: signature
         };
 
-        console.log(`[🔥 NEW LAUNCH DETECTED] Mint: ${mintAddress} | Creator: ${deployerAddress}`);
+        console.log(`[🔥 NEW LAUNCH DETECTED] Mint: ${mintAddress} | Creator: ${deployerAddress || 'Bundler/Contract'}`);
         await forwardToBase44(base44Payload);
     }
 }
@@ -153,5 +161,5 @@ async function forwardToBase44(payload) {
     }
 }
 
-// Kickstart the firehose
+// Fire it up
 connectStream();
