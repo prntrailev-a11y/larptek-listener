@@ -17,7 +17,7 @@ const PUMP_FUN_PROGRAM_ID = "6EF8rrecth7Q6z28ba6tDi5Exg1H69Umupg7N6Z47N5f";
 
 function connectStream() {
     console.log(`[${new Date().toISOString()}] Connecting directly to Solana via Helius Atlas WS...`);
-    const ws = new WebSocket(HELIUS_WS_URL);
+    const ws = new WebSocket(process.env.HELIUS_WEBSOCKET_URL);
 
     ws.on('open', function open() {
         console.log(`✅ Connected to Helius! Subscribing to Pump.fun Program logs...`);
