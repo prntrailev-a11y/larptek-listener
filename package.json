@@ -14,6 +14,6 @@
   },
   "allowScripts": {
     "bufferutil@4.1.0": true,
-    "utf-8-validate@5.0.10": true
+    "utf-8-validate@6.0.6": true
   }
 }
