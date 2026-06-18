@@ -1,44 +1,41 @@
 import 'dotenv/config';
 import { Connection } from "@solana/web3.js";
 
-// ---- ENV SAFETY CHECKS ----
+// ---------- ENV SAFETY ----------
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
-const HELIUS_RPC_URL = process.env.HELIUS_RPC_URL;
+const RPC_URL = process.env.RPC_URL;
 
-// hard fail with clear message
+// Fail fast with clear message
 if (!HELIUS_API_KEY) {
-  throw new Error("Missing HELIUS_API_KEY in environment variables");
+  throw new Error("Missing HELIUS_API_KEY (set it in Render env vars)");
 }
 
-// If you provide full RPC URL, use it.
-// Otherwise build it from API key.
-let rpcUrl = HELIUS_RPC_URL;
+// If you are using Helius, build RPC properly
+// (THIS fixes your "http/https" error)
+const endpoint =
+  RPC_URL ||
+  `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 
-if (!rpcUrl) {
-  rpcUrl = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+if (!endpoint.startsWith("http://") && !endpoint.startsWith("https://")) {
+  throw new Error(`Bad RPC endpoint: ${endpoint}`);
 }
 
-// validate URL
-if (!rpcUrl.startsWith("http://") && !rpcUrl.startsWith("https://")) {
-  throw new Error(`Invalid RPC URL: ${rpcUrl}`);
-}
+// ---------- SOLANA CONNECTION ----------
+const connection = new Connection(endpoint, "confirmed");
 
-console.log("Using RPC:", rpcUrl);
+console.log("✅ Solana listener started");
+console.log("🔗 RPC:", endpoint);
 
-// ---- SOLANA CONNECTION ----
-const connection = new Connection(rpcUrl, "confirmed");
-
-// ---- BASIC KEEP-ALIVE TEST ----
-async function testConnection() {
+// ---------- SIMPLE KEEP-ALIVE TEST ----------
+async function ping() {
   try {
     const slot = await connection.getSlot();
-    console.log("Connected. Current slot:", slot);
+    console.log("📡 Current slot:", slot);
   } catch (err) {
-    console.error("RPC connection failed:", err);
+    console.error("❌ RPC error:", err.message);
   }
 }
 
-testConnection();
-
-// ---- YOUR LISTENER LOGIC BELOW ----
-// (keep your existing logic, just paste it under this)
+// run every 10s
+setInterval(ping, 10000);
+ping();
