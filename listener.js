@@ -4,8 +4,13 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+console.log("🔥 SCRIPT BOOTING...");
+
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const INGEST_SECRET = process.env.INGEST_SECRET;
+
+if (!HELIUS_API_KEY) console.error("❌ Missing HELIUS_API_KEY");
+if (!INGEST_SECRET) console.error("❌ Missing INGEST_SECRET");
 
 const BASE44_URL =
   "https://wooden-smart-coin-track.base44.app/api/functions/ingestRawLaunch";
@@ -15,22 +20,21 @@ const PUMPFUN_PROGRAM =
 
 const RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 
-/* ---------------- CONFIG (PRO FILTERS) ---------------- */
+/* ---------------- CONFIG ---------------- */
 const MIN_SCORE_TO_SEND = 65;
-const MAX_CONCURRENCY = 5;
-const MAX_RETRIES = 3;
+const MAX_CONCURRENCY = 3;
 
 /* ---------------- STATE ---------------- */
 const seen = new Set();
-const mintCooldown = new Map();
 let activeRequests = 0;
 const queue = [];
 
-/* ---------------- UTILS ---------------- */
-function sleep(ms) {
-  return new Promise(r => setTimeout(r, ms));
-}
+/* ---------------- LOG HELPERS ---------------- */
+const log = (...args) => console.log("[LOG]", ...args);
+const warn = (...args) => console.warn("[WARN]", ...args);
+const err = (...args) => console.error("[ERR]", ...args);
 
+/* ---------------- DEDUPE ---------------- */
 function dedupe(sig) {
   if (seen.has(sig)) return true;
   seen.add(sig);
@@ -38,18 +42,8 @@ function dedupe(sig) {
   return false;
 }
 
-function inCooldown(mint) {
-  const last = mintCooldown.get(mint);
-  if (!last) return false;
-  return Date.now() - last < 5 * 60 * 1000; // 5 min cooldown
-}
-
-function setCooldown(mint) {
-  mintCooldown.set(mint, Date.now());
-}
-
-/* ---------------- RPC (WITH RETRY + 429 HANDLING) ---------------- */
-async function getTx(signature, attempt = 0) {
+/* ---------------- RPC ---------------- */
+async function getTx(signature) {
   try {
     const res = await axios.post(
       RPC_URL,
@@ -65,54 +59,56 @@ async function getTx(signature, attempt = 0) {
           }
         ]
       },
-      { timeout: 8000 }
+      { timeout: 10000 }
     );
 
     return res.data?.result;
   } catch (e) {
-    const status = e?.response?.status;
-
-    if (status === 429 && attempt < MAX_RETRIES) {
-      await sleep(500 * Math.pow(2, attempt));
-      return getTx(signature, attempt + 1);
-    }
-
-    console.error("❌ getTx failed:", e.message);
+    err("getTx failed:", e.message);
     return null;
   }
 }
 
-/* ---------------- 1. DECODER (IMPROVED) ---------------- */
+/* ---------------- DECODER ---------------- */
 function decodePump(tx) {
-  const msg = tx?.transaction?.message;
-  const keys = msg?.accountKeys || [];
-  const meta = tx?.meta || {};
+  try {
+    const msg = tx?.transaction?.message;
+    const keys = msg?.accountKeys || [];
+    const meta = tx?.meta || {};
 
-  if (meta.err) return null;
+    if (meta.err) {
+      warn("TX failed (meta.err)");
+      return null;
+    }
 
-  const creator = keys?.[0]?.pubkey || keys?.[0] || null;
+    const post = meta.postTokenBalances || [];
+    if (!post.length) {
+      warn("No postTokenBalances");
+      return null;
+    }
 
-  const post = meta.postTokenBalances || [];
-  if (!post.length) return null;
+    const mint = post.find(p => p?.mint)?.mint;
+    if (!mint) {
+      warn("No mint found");
+      return null;
+    }
 
-  // extract unique mint
-  const mint = post.find(p => p?.mint)?.mint || null;
-  if (!mint) return null;
+    const creator = keys?.[0]?.pubkey || keys?.[0];
 
-  const bondingCurve =
-    keys.slice(2, 10).find(k => k)?.pubkey || null;
-
-  return {
-    mint,
-    creator,
-    bondingCurve,
-    launchedAt: tx.blockTime
-      ? new Date(tx.blockTime * 1000).toISOString()
-      : new Date().toISOString()
-  };
+    return {
+      mint,
+      creator,
+      launchedAt: tx.blockTime
+        ? new Date(tx.blockTime * 1000).toISOString()
+        : new Date().toISOString()
+    };
+  } catch (e) {
+    err("decodePump error:", e.message);
+    return null;
+  }
 }
 
-/* ---------------- 2. SNIPERS ---------------- */
+/* ---------------- SNIPERS ---------------- */
 function getSnipers(tx, mint) {
   const post = tx?.meta?.postTokenBalances || [];
   const holders = new Set();
@@ -123,20 +119,20 @@ function getSnipers(tx, mint) {
     }
   }
 
-  return [...holders].slice(0, 10);
+  return [...holders];
 }
 
-/* ---------------- 3. SCORING (TIGHTENED FILTER) ---------------- */
+/* ---------------- SCORING ---------------- */
 function scoreRunner(tx, snipers, decoded) {
   let score = 0;
 
-  if (tx?.meta?.postTokenBalances?.length > 0) score += 20;
+  if (tx?.meta?.postTokenBalances?.length) score += 20;
 
   if (snipers.length <= 3) score += 25;
   else if (snipers.length <= 7) score += 15;
   else score += 5;
 
-  if (decoded.creator && !snipers.includes(decoded.creator)) {
+  if (decoded?.creator && !snipers.includes(decoded.creator)) {
     score += 15;
   }
 
@@ -152,51 +148,69 @@ function scoreRunner(tx, snipers, decoded) {
 /* ---------------- BASE44 ---------------- */
 async function sendToBase44(payload) {
   try {
+    log("📤 Sending to Base44:", payload.mint);
+
     await axios.post(BASE44_URL, payload, {
       headers: {
         "Content-Type": "application/json",
         "x-ingest-secret": INGEST_SECRET
       },
-      timeout: 8000
+      timeout: 10000
     });
+
+    log("✅ Base44 success");
   } catch (e) {
-    console.error("❌ ingest failed:", e.message);
+    err("Base44 failed:", e.message);
   }
 }
 
-/* ---------------- PROCESSOR QUEUE ---------------- */
+/* ---------------- PROCESSOR ---------------- */
 async function processJob(sig, logs) {
-  if (dedupe(sig)) return;
+  log("🔎 Processing signature:", sig);
+
+  if (dedupe(sig)) {
+    log("⛔ Duplicate skipped");
+    return;
+  }
+
+  log("📜 Logs sample:", logs?.slice(0, 3));
 
   const isLaunch = logs?.some(l =>
     l.toLowerCase().includes("initialize")
   );
 
-  if (!isLaunch) return;
+  if (!isLaunch) {
+    log("⛔ Not a launch tx");
+    return;
+  }
 
   const tx = await getTx(sig);
-  if (!tx) return;
+  if (!tx) {
+    warn("No tx returned");
+    return;
+  }
 
   const decoded = decodePump(tx);
-  if (!decoded?.mint) return;
-
-  if (inCooldown(decoded.mint)) return;
+  if (!decoded?.mint) {
+    warn("No mint decoded");
+    return;
+  }
 
   const snipers = getSnipers(tx, decoded.mint);
   const score = scoreRunner(tx, snipers, decoded);
 
-  if (score < MIN_SCORE_TO_SEND) return;
+  log(`📊 SCORE: ${score} | SNIPERS: ${snipers.length}`);
 
-  setCooldown(decoded.mint);
+  if (score < MIN_SCORE_TO_SEND) {
+    log("⛔ Filtered out (low score)");
+    return;
+  }
 
-  console.log(
-    `🚀 LAUNCH ${decoded.mint} | SCORE ${score}`
-  );
+  log("🚀 PASS FILTER:", decoded.mint);
 
   await sendToBase44({
     mint: decoded.mint,
     creator: decoded.creator,
-    bondingCurve: decoded.bondingCurve,
     snipers,
     runnerScore: score,
     launched: decoded.launchedAt,
@@ -204,7 +218,7 @@ async function processJob(sig, logs) {
   });
 }
 
-/* ---------------- WORKER CONTROL ---------------- */
+/* ---------------- QUEUE ---------------- */
 function enqueue(job) {
   queue.push(job);
   drain();
@@ -226,47 +240,60 @@ async function drain() {
   }
 }
 
-/* ---------------- WS ---------------- */
+/* ---------------- WS CONNECT ---------------- */
 function connect() {
+  log("🚀 Connecting WS...");
+
   const ws = new WebSocket(
     `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`
   );
 
   ws.on("open", () => {
-    ws.send(
-      JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "logsSubscribe",
-        params: [
-          { mentions: [PUMPFUN_PROGRAM] },
-          { commitment: "confirmed" }
-        ]
-      })
-    );
+    log("🟢 WS CONNECTED");
+
+    const sub = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "logsSubscribe",
+      params: [
+        { mentions: [PUMPFUN_PROGRAM] },
+        { commitment: "confirmed" }
+      ]
+    };
+
+    log("📡 Subscribing...");
+    ws.send(JSON.stringify(sub));
   });
 
   ws.on("message", raw => {
     try {
       const msg = JSON.parse(raw);
+
       const value = msg?.params?.result?.value;
 
-      if (!value?.signature) return;
+      if (!value?.signature) {
+        log("📩 Non-signature message:", msg.method || "unknown");
+        return;
+      }
+
+      log("📩 TX RECEIVED:", value.signature);
 
       enqueue({
         sig: value.signature,
         logs: value.logs || []
       });
-    } catch {}
+    } catch (e) {
+      err("WS parse error:", e.message);
+    }
   });
 
   ws.on("close", () => {
-    console.log("🔁 reconnecting...");
+    warn("🔁 WS closed — reconnecting...");
     setTimeout(connect, 3000);
   });
 
   ws.on("error", e => {
-    console.error("ws error:", e.message);
+    err("WS error:", e.message);
     ws.close();
   });
 }
