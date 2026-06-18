@@ -5,7 +5,10 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
-const BASE44_WEBHOOK_URL = process.env.BASE44_WEBHOOK_URL;
+const BASE44_URL =
+  "https://wooden-smart-coin-track.base44.app/api/functions/ingestRawLaunch";
+
+const INGEST_SECRET = process.env.INGEST_SECRET;
 
 const PUMPFUN_PROGRAM =
   "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
@@ -15,21 +18,19 @@ const RPC_URL =
 
 const seen = new Set();
 
-function isDuplicate(signature) {
-  if (seen.has(signature)) return true;
-
-  seen.add(signature);
-
-  setTimeout(() => {
-    seen.delete(signature);
-  }, 60 * 60 * 1000);
-
+function dedupe(sig) {
+  if (seen.has(sig)) return true;
+  seen.add(sig);
+  setTimeout(() => seen.delete(sig), 60 * 60 * 1000);
   return false;
 }
 
-async function getParsedTransaction(signature) {
+/**
+ * Pull full parsed tx from Helius
+ */
+async function fetchTx(signature) {
   try {
-    const response = await axios.post(RPC_URL, {
+    const res = await axios.post(RPC_URL, {
       jsonrpc: "2.0",
       id: 1,
       method: "getTransaction",
@@ -42,66 +43,68 @@ async function getParsedTransaction(signature) {
       ]
     });
 
-    return response.data?.result || null;
-  } catch (err) {
-    console.error("getTransaction failed:", err.message);
+    return res.data?.result;
+  } catch (e) {
+    console.error("TX fetch error:", e.message);
     return null;
   }
 }
 
-function extractLaunchData(tx) {
+/**
+ * Extract pump.fun launch info
+ * NOTE: Pump.fun mints are usually first account created in tx
+ */
+function extractPumpLaunch(tx) {
   try {
-    const message = tx.transaction?.message;
-
-    if (!message) return null;
-
-    const accounts = message.accountKeys || [];
+    const msg = tx?.transaction?.message;
+    const keys = msg?.accountKeys || [];
 
     const creator =
-      accounts?.[0]?.pubkey ||
-      accounts?.[0] ||
+      keys?.[0]?.pubkey || keys?.[0] || null;
+
+    const mint =
+      keys?.find(k =>
+        typeof k === "object" ? k.pubkey : k
+      )?.pubkey ||
+      keys?.[1]?.pubkey ||
       null;
 
-    let mint = null;
-    let bondingCurve = null;
+    const symbol =
+      "PUMP"; // placeholder (Base44 requires it)
 
-    for (const acct of accounts) {
-      const key = acct.pubkey || acct;
-
-      if (!mint) {
-        mint = key;
-        continue;
-      }
-
-      if (!bondingCurve) {
-        bondingCurve = key;
-      }
-
-      if (mint && bondingCurve) break;
-    }
+    const name =
+      "Pump Token";
 
     return {
       mint,
       creator,
-      bondingCurve,
-      launchTimestamp:
-        tx.blockTime
-          ? tx.blockTime * 1000
-          : Date.now()
+      symbol,
+      name,
+      launched: tx.blockTime
+        ? new Date(tx.blockTime * 1000).toISOString()
+        : new Date().toISOString()
     };
-  } catch (err) {
-    console.error("extractLaunchData failed:", err);
+  } catch (e) {
+    console.error("extract error:", e);
     return null;
   }
 }
 
+/**
+ * Send to Base44 ingestion endpoint
+ */
 async function sendToBase44(payload) {
   try {
-    await axios.post(BASE44_WEBHOOK_URL, payload);
-  } catch (err) {
+    await axios.post(BASE44_URL, payload, {
+      headers: {
+        "Content-Type": "application/json",
+        "x-ingest-secret": INGEST_SECRET
+      }
+    });
+  } catch (e) {
     console.error(
-      "Base44 webhook failed:",
-      err.response?.data || err.message
+      "Base44 error:",
+      e.response?.data || e.message
     );
   }
 }
@@ -114,7 +117,7 @@ function connect() {
   );
 
   ws.on("open", () => {
-    console.log("Connected.");
+    console.log("Connected");
 
     ws.send(
       JSON.stringify({
@@ -122,68 +125,61 @@ function connect() {
         id: 1,
         method: "logsSubscribe",
         params: [
-          {
-            mentions: [PUMPFUN_PROGRAM]
-          },
-          {
-            commitment: "confirmed"
-          }
+          { mentions: [PUMPFUN_PROGRAM] },
+          { commitment: "confirmed" }
         ]
       })
     );
   });
 
-  ws.on("message", async raw => {
+  ws.on("message", async (raw) => {
     try {
       const msg = JSON.parse(raw);
+      const value = msg?.params?.result?.value;
 
-      if (!msg.params?.result?.value) return;
+      if (!value?.signature) return;
 
-      const value = msg.params.result.value;
+      const sig = value.signature;
 
-      const signature = value.signature;
+      if (dedupe(sig)) return;
 
-      if (!signature) return;
+      const logs = value.logs || [];
 
-      if (isDuplicate(signature)) return;
-
-      console.log("Pump transaction:", signature);
-
-      const tx = await getParsedTransaction(signature);
-
-      if (!tx) return;
-
-      const launch = extractLaunchData(tx);
-
-      if (!launch) return;
-
-      const payload = {
-        source: "pumpfun",
-        signature,
-        mint: launch.mint,
-        creator: launch.creator,
-        bondingCurve: launch.bondingCurve,
-        launchTimestamp: launch.launchTimestamp,
-        receivedAt: Date.now()
-      };
-
-      console.log(
-        `Launch detected: ${launch.mint}`
+      const isLaunch = logs.some(l =>
+        l.toLowerCase().includes("initialize")
       );
 
-      await sendToBase44(payload);
-    } catch (err) {
-      console.error(err.message);
+      if (!isLaunch) return;
+
+      console.log("Pump launch:", sig);
+
+      const tx = await fetchTx(sig);
+      if (!tx) return;
+
+      const launch = extractPumpLaunch(tx);
+      if (!launch?.mint) return;
+
+      await sendToBase44({
+        mint: launch.mint,
+        name: launch.name,
+        symbol: launch.symbol,
+        mcap: 0,
+        launched: launch.launched
+      });
+
+      console.log("Sent to Base44:", launch.mint);
+    } catch (e) {
+      console.error(e.message);
     }
   });
 
   ws.on("close", () => {
-    console.log("Disconnected. Reconnecting...");
+    console.log("Reconnecting...");
     setTimeout(connect, 5000);
   });
 
-  ws.on("error", err => {
-    console.error("WebSocket Error:", err.message);
+  ws.on("error", (e) => {
+    console.error("WS error:", e.message);
     ws.close();
   });
 }
