@@ -9,6 +9,11 @@
     "@solana/web3.js": "^1.98.0",
     "axios": "^1.8.4",
     "dotenv": "^16.4.7",
+    "uuid": "^9.0.1",
     "ws": "^8.18.1"
+  },
+  "allowScripts": {
+    "bufferutil@4.1.0": true,
+    "utf-8-validate@5.0.10": true
   }
 }
