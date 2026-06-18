@@ -1,12 +1,22 @@
 const WebSocket = require('ws');
 require('dotenv').config();
 
-// Configuration
-const BASE44_INGEST_URL = process.env.BASE44_INGEST_URL || 'http://localhost:5000/api/ingest';
-const PUMP_WS_URL = 'wss://pumpportal.fun/api/data'; 
+// Configuration from Environment
+const BASE44_INGEST_URL = process.env.BASE44_INGEST_URL; 
+const INGEST_SECRET = process.env.INGEST_SECRET; // Must match base44's env
 
+if (!BASE44_INGEST_URL || !INGEST_SECRET) {
+    console.error("❌ CRITICAL ERROR: BASE44_INGEST_URL and INGEST_SECRET must be set in your environment variables.");
+    process.exit(1);
+}
+
+const PUMP_WS_URL = 'wss://pumpportal.fun/api/data'; 
 let reconnectInterval = 1000;
 const MAX_RECONNECT_INTERVAL = 30000;
+
+// SOL price tracking placeholder to calculate USD market cap if needed
+// (PumpPortal usually provides USD mcap estimates or marketCapSol)
+let currentSolPriceUsd = 160; 
 
 function connectStream() {
     console.log(`[${new Date().toISOString()}] Connecting to Pump.fun stream...`);
@@ -14,30 +24,43 @@ function connectStream() {
 
     ws.on('open', function open() {
         console.log(`[${new Date().toISOString()}] Connected! Subscribing to new token launches...`);
-        
-        // Reset reconnect timer on a successful connection
         reconnectInterval = 1000; 
 
-        // Send subscription payload for token creation events
-        const payload = {
-            method: "subscribeNewToken"
-        };
-        ws.send(JSON.stringify(payload));
+        // Subscribe to token creations
+        ws.send(JSON.stringify({ method: "subscribeNewToken" }));
     });
 
     ws.on('message', async function message(data) {
         try {
             const parsedData = JSON.parse(data);
             
-            // Filter for token creation events specifically
+            // Validate it's a creation event
             if (parsedData.txType === 'create' || parsedData.mint) {
-                console.log(`[Launch Detected] ${parsedData.name} (${parsedData.symbol}) | Mint: ${parsedData.mint}`);
                 
-                // Ship raw packet immediately over to your recursive base44 engine
-                forwardToBase44(parsedData);
+                // Calculate USD Market Cap from the stream data
+                // PumpPortal sends marketCapSol. If not present, default to a standard launch mcap (~$4,500)
+                let calculatedMcap = 4500;
+                if (parsedData.marketCapSol) {
+                    calculatedMcap = Math.round(parsedData.marketCapSol * currentSolPriceUsd);
+                }
+
+                // Map exactly to your base44 Deno schema: { mint, name, symbol, mcap, launched, logo }
+                const base44Payload = {
+                    mint: parsedData.mint,
+                    name: parsedData.name,
+                    symbol: parsedData.symbol,
+                    mcap: calculatedMcap,
+                    launched: new Date().toISOString(), // Use current time as fallback
+                    logo: parsedData.image || parsedData.uri || null // Pass uri/image metadata if available
+                };
+
+                console.log(`[Launch] ${base44Payload.symbol} detected. Sending to base44 (Est. MC: $${base44Payload.mcap})...`);
+                
+                // Fire and forget to keep the websocket frame ticking loop clear
+                forwardToBase44(base44Payload);
             }
         } catch (err) {
-            console.error('Error parsing block packet:', err.message);
+            console.error('Parsing/Processing Error:', err.message);
         }
     });
 
@@ -46,38 +69,52 @@ function connectStream() {
     });
 
     ws.on('close', function close() {
-        console.log(`Socket closed. Reconnecting in ${reconnectInterval / 1000} seconds...`);
+        console.log(`Socket disconnected. Reconnecting in ${reconnectInterval / 1000} seconds...`);
         setTimeout(() => {
-            // Exponential backoff so you don't spam the server if it's down
             reconnectInterval = Math.min(reconnectInterval * 2, MAX_RECONNECT_INTERVAL);
             connectStream();
         }, reconnectInterval);
     });
 }
 
-// Push to your recursive processing backend
-async function forwardToBase44(tokenPayload) {
+async function forwardToBase44(payload) {
     try {
         const response = await fetch(BASE44_INGEST_URL, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                // 'Authorization': `Bearer ${process.env.BASE44_API_KEY}` // Uncomment if base44 requires auth
+                'x-ingest-secret': INGEST_SECRET // Matches your Deno req.headers.get('x-ingest-secret')
             },
-            body: JSON.stringify({
-                source: 'pump_fun_stream',
-                timestamp: Date.now(),
-                data: tokenPayload
-            })
+            body: JSON.stringify(payload)
         });
 
-        if (!response.ok) {
-            console.error(`base44 Ingest failed with status: ${response.status}`);
+        const result = await response.json();
+        
+        if (response.ok) {
+            if (result.skipped) {
+                console.log(`[base44 Response] ⚠️ SKIPPED: ${result.reason}`);
+            } else {
+                console.log(`[base44 Response] ✅ Ingested successfully: ${payload.symbol}`);
+            }
+        } else {
+            console.error(`[base44 Response] ❌ Failed Status ${response.status}:`, result.error || 'Unknown Error');
         }
     } catch (fetchError) {
-        console.error('Failed to pipe data packet to base44 engine:', fetchError.message);
+        console.error('Could not transmit data packet to base44 backend:', fetchError.message);
     }
 }
 
-// Fire up the background listener
-connectStream();
+// Dynamically refresh SOL price every 10 minutes to keep MCAP mappings highly accurate
+async function updateSolPrice() {
+    try {
+        const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
+        const data = await res.json();
+        if (data.solana?.usd) {
+            currentSolPriceUsd = data.solana.usd;
+        }
+    } catch (e) {
+        // Fallback silently to previous price state if API rates limits us
+    }
+}
+setInterval(updateSolPrice, 600000);
+updateSolPrice().then(() => connectStream());
