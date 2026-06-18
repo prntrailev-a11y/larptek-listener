@@ -1,120 +1,102 @@
 const WebSocket = require('ws');
 require('dotenv').config();
 
-// Configuration from Environment
-const BASE44_INGEST_URL = process.env.BASE44_INGEST_URL; 
-const INGEST_SECRET = process.env.INGEST_SECRET; // Must match base44's env
+const BASE44_INGEST_URL = process.env.BASE44_INGEST_URL;
+const INGEST_SECRET = process.env.INGEST_SECRET;
+// Your Helius WSS URL containing your API Key
+const HELIUS_WS_URL = `wss://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`;
 
-if (!BASE44_INGEST_URL || !INGEST_SECRET) {
-    console.error("❌ CRITICAL ERROR: BASE44_INGEST_URL and INGEST_SECRET must be set in your environment variables.");
+if (!BASE44_INGEST_URL || !INGEST_SECRET || !process.env.HELIUS_API_KEY) {
+    console.error("❌ Missing environment variables (HELIUS_API_KEY, BASE44_INGEST_URL, or INGEST_SECRET)");
     process.exit(1);
 }
 
-const PUMP_WS_URL = 'wss://pumpportal.fun/api/data'; 
-let reconnectInterval = 1000;
-const MAX_RECONNECT_INTERVAL = 30000;
+const PUMP_FUN_PROGRAM_ID = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
 
-// SOL price tracking placeholder to calculate USD market cap if needed
-// (PumpPortal usually provides USD mcap estimates or marketCapSol)
-let currentSolPriceUsd = 160; 
-
-function connectStream() {
-    console.log(`[${new Date().toISOString()}] Connecting to Pump.fun stream...`);
-    const ws = new WebSocket(PUMP_WS_URL);
+function connectHeliusStream() {
+    console.log("Connecting directly to Solana via Helius WS...");
+    const ws = new WebSocket(HELIUS_WS_URL);
 
     ws.on('open', function open() {
-        console.log(`[${new Date().toISOString()}] Connected! Subscribing to new token launches...`);
-        reconnectInterval = 1000; 
-
-        // Subscribe to token creations
-        ws.send(JSON.stringify({ method: "subscribeNewToken" }));
+        console.log("Connected to Helius. Subscribing to Pump.fun Program logs...");
+        
+        // Tell Helius to listen to the Pump.fun program account
+        ws.send(JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "logsSubscribe",
+            params: [
+                { mentions: [PUMP_FUN_PROGRAM_ID] },
+                { commitment: "processed" } // "processed" is the fastest speed possible on Solana
+            ]
+        }));
     });
 
-    ws.on('message', async function message(data) {
+    ws.on('message', function message(data) {
         try {
-            const parsedData = JSON.parse(data);
+            const response = JSON.parse(data);
             
-            // Validate it's a creation event
-            if (parsedData.txType === 'create' || parsedData.mint) {
+            // Check if it's a log notification
+            if (response.method === 'logsNotification') {
+                const logs = response.params.result.value.logs;
+                const signature = response.params.result.value.signature;
                 
-                // Calculate USD Market Cap from the stream data
-                // PumpPortal sends marketCapSol. If not present, default to a standard launch mcap (~$4,500)
-                let calculatedMcap = 4500;
-                if (parsedData.marketCapSol) {
-                    calculatedMcap = Math.round(parsedData.marketCapSol * currentSolPriceUsd);
+                // Search the raw logs to see if this transaction was a "Create" (Token Launch)
+                const isCreate = logs.some(log => log.includes('Instruction: Create'));
+                
+                if (isCreate) {
+                    console.log(`[Helius Detected Launch] Tx Sig: ${signature}`);
+                    
+                    // Note: Raw logs give you the transaction signature. 
+                    // To get the token name, symbol, and mint address, you instantly 
+                    // request the full transaction data from Helius or construct the predictable mint layout.
+                    fetchAndParseTx(signature);
                 }
-
-                // Map exactly to your base44 Deno schema: { mint, name, symbol, mcap, launched, logo }
-                const base44Payload = {
-                    mint: parsedData.mint,
-                    name: parsedData.name,
-                    symbol: parsedData.symbol,
-                    mcap: calculatedMcap,
-                    launched: new Date().toISOString(), // Use current time as fallback
-                    logo: parsedData.image || parsedData.uri || null // Pass uri/image metadata if available
-                };
-
-                console.log(`[Launch] ${base44Payload.symbol} detected. Sending to base44 (Est. MC: $${base44Payload.mcap})...`);
-                
-                // Fire and forget to keep the websocket frame ticking loop clear
-                forwardToBase44(base44Payload);
             }
         } catch (err) {
-            console.error('Parsing/Processing Error:', err.message);
+            console.error('Error handling Helius log event:', err.message);
         }
     });
 
-    ws.on('error', function error(err) {
-        console.error('WebSocket Error:', err.message);
-    });
-
-    ws.on('close', function close() {
-        console.log(`Socket disconnected. Reconnecting in ${reconnectInterval / 1000} seconds...`);
-        setTimeout(() => {
-            reconnectInterval = Math.min(reconnectInterval * 2, MAX_RECONNECT_INTERVAL);
-            connectStream();
-        }, reconnectInterval);
-    });
+    ws.on('close', () => setTimeout(connectHeliusStream, 1000));
 }
 
-async function forwardToBase44(payload) {
+async function fetchAndParseTx(signature) {
     try {
-        const response = await fetch(BASE44_INGEST_URL, {
+        // Use Helius HTTP RPC to pull the fully resolved transaction details
+        const response = await fetch(`https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY}`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'x-ingest-secret': INGEST_SECRET // Matches your Deno req.headers.get('x-ingest-secret')
-            },
-            body: JSON.stringify(payload)
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: "parse-tx",
+                method: "getTransaction",
+                params: [signature, { maxSupportedTransactionVersion: 0, encoding: "jsonParsed" }]
+            })
         });
-
-        const result = await response.json();
         
-        if (response.ok) {
-            if (result.skipped) {
-                console.log(`[base44 Response] ⚠️ SKIPPED: ${result.reason}`);
-            } else {
-                console.log(`[base44 Response] ✅ Ingested successfully: ${payload.symbol}`);
-            }
-        } else {
-            console.error(`[base44 Response] ❌ Failed Status ${response.status}:`, result.error || 'Unknown Error');
+        const txData = await response.json();
+        
+        // Extract the mint public key and metadata from the token balances array
+        const tokenBalances = txData.result?.meta?.postTokenBalances;
+        if (tokenBalances && tokenBalances.length > 0) {
+            const mint = tokenBalances[0].mint;
+            
+            // Re-construct the clean package your base44 endpoint expects
+            const base44Payload = {
+                mint: mint,
+                name: "Unknown (RPC Fetch)", // To get names/symbols from raw RPC, you parse the metadata account layout
+                symbol: "UNKNOWN",
+                mcap: 4500, // Standard starting market cap fallback
+                launched: new Date().toISOString()
+            };
+            
+            forwardToBase44(base44Payload);
         }
-    } catch (fetchError) {
-        console.error('Could not transmit data packet to base44 backend:', fetchError.message);
+    } catch (err) {
+        console.error("Failed parsing transaction via Helius HTTP:", err.message);
     }
 }
 
-// Dynamically refresh SOL price every 10 minutes to keep MCAP mappings highly accurate
-async function updateSolPrice() {
-    try {
-        const res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd');
-        const data = await res.json();
-        if (data.solana?.usd) {
-            currentSolPriceUsd = data.solana.usd;
-        }
-    } catch (e) {
-        // Fallback silently to previous price state if API rates limits us
-    }
-}
-setInterval(updateSolPrice, 600000);
-updateSolPrice().then(() => connectStream());
+// ... include your forwardToBase44 function below ...
+connectHeliusStream();
