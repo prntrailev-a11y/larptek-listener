@@ -1,35 +1,54 @@
-import dotenv from "dotenv";
-dotenv.config();
+import express from "express";
+import axios from "axios";
 
-import { Connection } from "@solana/web3.js";
+const app = express();
+app.use(express.json());
 
-// ---------- RPC FIX ----------
-const RPC_URL =
-  process.env.RPC_URL ||
-  process.env.HELIUS_RPC ||
-  "https://api.mainnet-beta.solana.com";
+// endpoint Render will keep alive
+app.get("/", (req, res) => {
+  res.send("listener alive");
+});
 
-console.log("🔗 RPC RAW VALUE:", RPC_URL);
-
-// prevent silent bad URLs
-if (!RPC_URL.startsWith("http")) {
-  throw new Error("RPC_URL invalid or missing http/https prefix");
-}
-
-const connection = new Connection(RPC_URL, "confirmed");
-
-// ---------- START ----------
-console.log("✅ Solana listener starting");
-
-async function printSlot() {
+// main webhook receiver
+app.post("/helius", async (req, res) => {
   try {
-    const slot = await connection.getSlot();
-    console.log("📡 Current slot:", slot);
+    const events = req.body;
+
+    for (const event of events) {
+      const txType = detectType(event);
+
+      if (txType === "LP_ADD" || txType === "PUMP_LAUNCH") {
+        await forwardToBase44(event);
+      }
+    }
+
+    res.status(200).send("ok");
   } catch (err) {
-    console.error("Slot error:", err);
+    console.error(err);
+    res.status(500).send("error");
   }
+});
+
+function detectType(event) {
+  const desc = event.description?.toLowerCase() || "";
+
+  if (desc.includes("initialize") || desc.includes("create")) {
+    return "PUMP_LAUNCH";
+  }
+
+  if (desc.includes("add liquidity") || desc.includes("raydium")) {
+    return "LP_ADD";
+  }
+
+  return "IGNORE";
 }
 
-// loop
-setInterval(printSlot, 10000);
-printSlot();
+async function forwardToBase44(event) {
+  await axios.post(process.env.BASE44_WEBHOOK_URL, {
+    source: "listener",
+    data: event
+  });
+}
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("listener running on", PORT));
