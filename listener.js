@@ -4,6 +4,8 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+console.log("🔥 LISTENER BOOTED");
+
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const INGEST_SECRET = process.env.INGEST_SECRET;
 
@@ -28,84 +30,56 @@ function dedupe(sig) {
 
 /* ---------------- FETCH TX ---------------- */
 async function getTx(signature) {
-  const res = await axios.post(RPC_URL, {
-    jsonrpc: "2.0",
-    id: 1,
-    method: "getTransaction",
-    params: [
-      signature,
-      {
-        encoding: "jsonParsed",
-        maxSupportedTransactionVersion: 0
-      }
-    ]
-  });
+  try {
+    const res = await axios.post(RPC_URL, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "getTransaction",
+      params: [
+        signature,
+        {
+          encoding: "jsonParsed",
+          maxSupportedTransactionVersion: 0
+        }
+      ]
+    });
 
-  return res.data?.result;
+    return res.data?.result;
+  } catch (err) {
+    console.error("❌ getTx error:", err.message);
+    return null;
+  }
 }
 
-/* ---------------- 1. TRUE PUMP DECODER ---------------- */
-function decodePump(tx) {
-  const msg = tx.transaction.message;
-  const keys = msg.accountKeys || [];
-
-  const meta = tx.meta || {};
-
-  const creator = keys?.[0]?.pubkey || keys?.[0];
-
-  // REAL mint detection via token balances
+/* ---------------- TRUE MINT EXTRACTOR ---------------- */
+function extractMint(tx) {
   let mint = null;
 
-  const postBalances = meta.postTokenBalances || [];
+  const post = tx?.meta?.postTokenBalances || [];
+  const pre = tx?.meta?.preTokenBalances || [];
 
-  if (postBalances.length > 0) {
-    mint = postBalances[0].mint;
+  // 1. strongest signal
+  if (post.length > 0) {
+    mint = post[0].mint;
   }
 
-  // fallback heuristic
+  // 2. fallback diff scan
   if (!mint) {
-    mint =
-      keys.find(k =>
-        typeof k === "object"
-          ? k.pubkey?.length > 30
-          : typeof k === "string" && k.length > 30
-      )?.pubkey || null;
+    const all = [...pre, ...post];
+    mint = all.find(x => x?.mint)?.mint || null;
   }
 
-  const bondingCurve =
-    keys.slice(2, 8).find(k => k)?.pubkey || null;
-
-  return {
-    mint,
-    creator,
-    bondingCurve,
-    launchedAt: tx.blockTime
-      ? new Date(tx.blockTime * 1000).toISOString()
-      : new Date().toISOString()
-  };
+  return mint;
 }
 
-/* ---------------- 2. METADATA RESOLVER ---------------- */
-function resolveMetadata(decoded) {
-  // pump.fun tokens often lack metadata at launch
-  // so we intentionally keep it safe + minimal
-
-  return {
-    name: "Pump Token",
-    symbol: "PUMP",
-    logo: null
-  };
-}
-
-/* ---------------- 3. SNIPER DETECTOR ---------------- */
+/* ---------------- SNIPER DETECTION ---------------- */
 function getSnipers(tx, mint) {
-  const meta = tx.meta || {};
-  const post = meta.postTokenBalances || [];
+  const post = tx?.meta?.postTokenBalances || [];
 
   const holders = [];
 
   for (const p of post) {
-    if (p.owner && p.mint === mint) {
+    if (p.mint === mint && p.owner) {
       holders.push(p.owner);
     }
   }
@@ -113,50 +87,56 @@ function getSnipers(tx, mint) {
   return [...new Set(holders)].slice(0, 10);
 }
 
-/* ---------------- 4. RUNNER SCORING ENGINE ---------------- */
+/* ---------------- SCORING ENGINE ---------------- */
 function scoreRunner(tx, snipers, decoded) {
   let score = 0;
 
-  // liquidity signal (presence of token balances)
   if (tx.meta?.postTokenBalances?.length > 0) score += 20;
 
-  // early concentration (few snipers = good)
   if (snipers.length <= 3) score += 25;
   else if (snipers.length <= 7) score += 15;
   else score += 5;
 
-  // dev wallet heuristic (creator != top holders)
   const creator = decoded.creator;
   if (!snipers.includes(creator)) score += 15;
 
-  // very early lifecycle bonus
   if (tx.blockTime) {
-    const ageMs = Date.now() - tx.blockTime * 1000;
-    if (ageMs < 60_000) score += 20; // < 1 min
-    else if (ageMs < 300_000) score += 10;
+    const age = Date.now() - tx.blockTime * 1000;
+
+    if (age < 60_000) score += 20;
+    else if (age < 300_000) score += 10;
   }
 
-  // cap score
   return Math.min(score, 100);
 }
 
 /* ---------------- BASE44 PUSH ---------------- */
 async function sendToBase44(payload) {
-  await axios.post(BASE44_URL, payload, {
-    headers: {
-      "Content-Type": "application/json",
-      "x-ingest-secret": INGEST_SECRET
-    }
-  });
+  try {
+    await axios.post(BASE44_URL, payload, {
+      headers: {
+        "Content-Type": "application/json",
+        "x-ingest-secret": INGEST_SECRET
+      }
+    });
+
+    console.log("📤 Sent to Base44");
+  } catch (err) {
+    console.error("❌ Base44 error:", err.response?.data || err.message);
+  }
 }
 
-/* ---------------- MAIN LOOP ---------------- */
+/* ---------------- MAIN ---------------- */
 function connect() {
+  console.log("🌐 Connecting to Helius...");
+
   const ws = new WebSocket(
     `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`
   );
 
   ws.on("open", () => {
+    console.log("🟢 WS CONNECTED");
+
     ws.send(
       JSON.stringify({
         jsonrpc: "2.0",
@@ -168,9 +148,11 @@ function connect() {
         ]
       })
     );
+
+    console.log("📡 logsSubscribe sent");
   });
 
-  ws.on("message", async raw => {
+  ws.on("message", async (raw) => {
     try {
       const msg = JSON.parse(raw);
       const value = msg?.params?.result?.value;
@@ -179,53 +161,55 @@ function connect() {
 
       const sig = value.signature;
 
+      console.log("📩 TX RECEIVED:", sig);
+
       if (dedupe(sig)) return;
 
-      const isLaunch = (value.logs || []).some(l =>
-        l.toLowerCase().includes("initialize")
-      );
-
-      if (!isLaunch) return;
+      console.log("📜 LOGS:", value.logs);
 
       const tx = await getTx(sig);
       if (!tx) return;
 
-      const decoded = decodePump(tx);
-      if (!decoded?.mint) return;
+      const mint = extractMint(tx);
 
-      const meta = resolveMetadata(decoded);
-      const snipers = getSnipers(tx, decoded.mint);
+      if (!mint) {
+        console.log("⚠️ No mint found, skipping");
+        return;
+      }
+
+      const snipers = getSnipers(tx, mint);
+
+      const decoded = {
+        mint,
+        creator: tx.transaction.message.accountKeys?.[0] || null
+      };
 
       const score = scoreRunner(tx, snipers, decoded);
 
-      console.log(
-        `NEW LAUNCH ${decoded.mint} | SCORE: ${score}`
-      );
+      console.log(`🚀 NEW LAUNCH ${mint} | SCORE: ${score}`);
 
       await sendToBase44({
-        mint: decoded.mint,
-        name: meta.name,
-        symbol: meta.symbol,
+        mint,
+        name: "Pump Token",
+        symbol: "PUMP",
         mcap: 0,
-        launched: decoded.launchedAt,
-
-        // enrichment
+        launched: new Date().toISOString(),
         creator: decoded.creator,
-        bondingCurve: decoded.bondingCurve,
         snipers,
         runnerScore: score
       });
-    } catch (e) {
-      console.error(e.message);
+    } catch (err) {
+      console.error("❌ message error:", err.message);
     }
   });
 
   ws.on("close", () => {
+    console.log("🔁 Reconnecting...");
     setTimeout(connect, 5000);
   });
 
-  ws.on("error", e => {
-    console.error("ws error:", e.message);
+  ws.on("error", (err) => {
+    console.error("❌ WS error:", err.message);
     ws.close();
   });
 }
