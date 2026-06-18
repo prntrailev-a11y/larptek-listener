@@ -28,121 +28,130 @@ function dedupe(sig) {
 
 /* ---------------- FETCH TX ---------------- */
 async function getTx(signature) {
-  try {
-    const res = await axios.post(RPC_URL, {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "getTransaction",
-      params: [
-        signature,
-        {
-          encoding: "jsonParsed",
-          maxSupportedTransactionVersion: 0
-        }
-      ]
-    });
+  const res = await axios.post(RPC_URL, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "getTransaction",
+    params: [
+      signature,
+      {
+        encoding: "jsonParsed",
+        maxSupportedTransactionVersion: 0
+      }
+    ]
+  });
 
-    return res.data?.result;
-  } catch (e) {
-    console.error("tx error:", e.message);
-    return null;
-  }
+  return res.data?.result;
 }
 
-/* ---------------- CORE DECODER ---------------- */
-function decodePumpLaunch(tx) {
-  try {
-    const msg = tx.transaction.message;
-    const keys = msg.accountKeys || [];
+/* ---------------- 1. TRUE PUMP DECODER ---------------- */
+function decodePump(tx) {
+  const msg = tx.transaction.message;
+  const keys = msg.accountKeys || [];
 
-    // CREATOR (usually fee payer)
-    const creator =
-      keys?.[0]?.pubkey || keys?.[0] || null;
+  const meta = tx.meta || {};
 
-    // MINT detection (SPL token mint = first new mint account in tx)
-    const mint =
+  const creator = keys?.[0]?.pubkey || keys?.[0];
+
+  // REAL mint detection via token balances
+  let mint = null;
+
+  const postBalances = meta.postTokenBalances || [];
+
+  if (postBalances.length > 0) {
+    mint = postBalances[0].mint;
+  }
+
+  // fallback heuristic
+  if (!mint) {
+    mint =
       keys.find(k =>
         typeof k === "object"
-          ? k.pubkey?.toString().length > 30
+          ? k.pubkey?.length > 30
           : typeof k === "string" && k.length > 30
-      )?.pubkey ||
-      keys?.[1]?.pubkey ||
-      null;
-
-    // BONDCURVE heuristic (pump.fun uses PDA-like account near mint)
-    const bondingCurve =
-      keys?.slice(2, 6)
-        .find(k =>
-          typeof k === "object"
-            ? k.pubkey
-            : k
-        )?.pubkey || null;
-
-    return {
-      mint,
-      creator,
-      bondingCurve,
-      launchedAt: tx.blockTime
-        ? new Date(tx.blockTime * 1000).toISOString()
-        : new Date().toISOString()
-    };
-  } catch (e) {
-    console.error("decode error:", e);
-    return null;
+      )?.pubkey || null;
   }
+
+  const bondingCurve =
+    keys.slice(2, 8).find(k => k)?.pubkey || null;
+
+  return {
+    mint,
+    creator,
+    bondingCurve,
+    launchedAt: tx.blockTime
+      ? new Date(tx.blockTime * 1000).toISOString()
+      : new Date().toISOString()
+  };
 }
 
-/* ---------------- SNIPER DETECTOR ---------------- */
-function extractSnipers(tx, mint) {
-  try {
-    const instructions =
-      tx.transaction.message.instructions || [];
+/* ---------------- 2. METADATA RESOLVER ---------------- */
+function resolveMetadata(decoded) {
+  // pump.fun tokens often lack metadata at launch
+  // so we intentionally keep it safe + minimal
 
-    const buyers = [];
+  return {
+    name: "Pump Token",
+    symbol: "PUMP",
+    logo: null
+  };
+}
 
-    for (const ix of instructions) {
-      const accounts = ix.accounts || [];
+/* ---------------- 3. SNIPER DETECTOR ---------------- */
+function getSnipers(tx, mint) {
+  const meta = tx.meta || {};
+  const post = meta.postTokenBalances || [];
 
-      for (const acc of accounts) {
-        if (
-          acc &&
-          typeof acc === "string" &&
-          acc.length > 30 &&
-          acc !== mint
-        ) {
-          buyers.push(acc);
-        }
-      }
+  const holders = [];
+
+  for (const p of post) {
+    if (p.owner && p.mint === mint) {
+      holders.push(p.owner);
     }
-
-    // unique + first 10
-    return [...new Set(buyers)].slice(0, 10);
-  } catch (e) {
-    return [];
   }
+
+  return [...new Set(holders)].slice(0, 10);
+}
+
+/* ---------------- 4. RUNNER SCORING ENGINE ---------------- */
+function scoreRunner(tx, snipers, decoded) {
+  let score = 0;
+
+  // liquidity signal (presence of token balances)
+  if (tx.meta?.postTokenBalances?.length > 0) score += 20;
+
+  // early concentration (few snipers = good)
+  if (snipers.length <= 3) score += 25;
+  else if (snipers.length <= 7) score += 15;
+  else score += 5;
+
+  // dev wallet heuristic (creator != top holders)
+  const creator = decoded.creator;
+  if (!snipers.includes(creator)) score += 15;
+
+  // very early lifecycle bonus
+  if (tx.blockTime) {
+    const ageMs = Date.now() - tx.blockTime * 1000;
+    if (ageMs < 60_000) score += 20; // < 1 min
+    else if (ageMs < 300_000) score += 10;
+  }
+
+  // cap score
+  return Math.min(score, 100);
 }
 
 /* ---------------- BASE44 PUSH ---------------- */
 async function sendToBase44(payload) {
-  try {
-    await axios.post(BASE44_URL, payload, {
-      headers: {
-        "Content-Type": "application/json",
-        "x-ingest-secret": INGEST_SECRET
-      }
-    });
-  } catch (e) {
-    console.error(
-      "base44 error:",
-      e.response?.data || e.message
-    );
-  }
+  await axios.post(BASE44_URL, payload, {
+    headers: {
+      "Content-Type": "application/json",
+      "x-ingest-secret": INGEST_SECRET
+    }
+  });
 }
 
 /* ---------------- MAIN LOOP ---------------- */
 function connect() {
-  console.log("Connecting...");
-
   const ws = new WebSocket(
     `wss://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`
   );
@@ -161,7 +170,7 @@ function connect() {
     );
   });
 
-  ws.on("message", async (raw) => {
+  ws.on("message", async raw => {
     try {
       const msg = JSON.parse(raw);
       const value = msg?.params?.result?.value;
@@ -172,9 +181,7 @@ function connect() {
 
       if (dedupe(sig)) return;
 
-      const logs = value.logs || [];
-
-      const isLaunch = logs.some(l =>
+      const isLaunch = (value.logs || []).some(l =>
         l.toLowerCase().includes("initialize")
       );
 
@@ -183,24 +190,30 @@ function connect() {
       const tx = await getTx(sig);
       if (!tx) return;
 
-      const decoded = decodePumpLaunch(tx);
+      const decoded = decodePump(tx);
       if (!decoded?.mint) return;
 
-      const snipers = extractSnipers(tx, decoded.mint);
+      const meta = resolveMetadata(decoded);
+      const snipers = getSnipers(tx, decoded.mint);
 
-      console.log("NEW PUMP LAUNCH:", decoded.mint);
+      const score = scoreRunner(tx, snipers, decoded);
+
+      console.log(
+        `NEW LAUNCH ${decoded.mint} | SCORE: ${score}`
+      );
 
       await sendToBase44({
         mint: decoded.mint,
-        name: "Pump Token",
-        symbol: "PUMP",
+        name: meta.name,
+        symbol: meta.symbol,
         mcap: 0,
         launched: decoded.launchedAt,
 
-        // enrichment fields (Base44 will ignore unknowns safely)
+        // enrichment
         creator: decoded.creator,
         bondingCurve: decoded.bondingCurve,
-        snipers
+        snipers,
+        runnerScore: score
       });
     } catch (e) {
       console.error(e.message);
@@ -208,11 +221,10 @@ function connect() {
   });
 
   ws.on("close", () => {
-    console.log("Reconnect...");
     setTimeout(connect, 5000);
   });
 
-  ws.on("error", (e) => {
+  ws.on("error", e => {
     console.error("ws error:", e.message);
     ws.close();
   });
